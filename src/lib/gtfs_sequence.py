@@ -1,6 +1,11 @@
 from collections import Counter
 from shapely.geometry import Point
 
+
+def deserialize_coord(values):
+    return Point(values[0], values[1])
+
+
 def get_stop_coord(stops_df, stop_id):
     """Returns the lon/lat Point for the stop with the given ID using the provided
     GTFS stops DataFrame."""
@@ -12,6 +17,25 @@ def most_common(list):
     """Returns the most common value in the given list."""
     counts = Counter(list)
     return counts.most_common(1)[0][0]
+
+
+def serialize_coord(coord):
+    return [coord.x, coord.y]
+
+
+def serialize_trip_time(trip_time):
+    return trip_time.isoformat()
+    
+
+def serialize_trip_times(trip_times):
+    return [serialize_trip_time(t) for t in trip_times]
+
+
+def serialize_trip_times_dict(trip_times_dict):
+    return {
+      trip_id: serialize_trip_times(trip_times)
+      for trip_id, trip_times in trip_times_dict.items()
+    }
 
 
 def snap_coord(coord, geometry):
@@ -32,6 +56,13 @@ class Sequence:
             self.trip_headsign = load_dict['trip_headsign']
             self.trip_ids = load_dict['trip_ids']
 
+            self.stop_coords = [
+                deserialize_coord(c) for c in load_dict['stop_coords']
+            ]
+            self.trip_times_dict = {}
+            
+            self.trip_ids_set = set(self.trip_ids)
+
         # Create new sequence genereated from GTFS data.
         else:
             if trips_df is None:
@@ -42,6 +73,9 @@ class Sequence:
             self.stop_ids = stop_ids
             self.trip_ids = trip_ids
             self.set_attributes(trips_df)
+
+            self.stop_coords = []
+            self.trip_times_dict = {}
 
     def assign_route_geometry(self, routes_gdf):
         """Assigns the matching route geometry in the given GeoDataFrame to this
@@ -58,13 +92,17 @@ class Sequence:
                 f'(route_id={self.route_id}, direction_id={self.direction_id})')
         self.route_geometry = matching_rows.iloc[0]['geometry']
         return True
-            
+
     def assign_stop_coords(self, stops_df):
         if self.route_geometry is None:
-            raise Exception('Route geometry must be assigned before assigning stop coordinates.')
-            
+            raise Exception(
+                'Route geometry must be assigned before assigning stop coordinates.'
+            )
+
         self.stop_coords = [get_stop_coord(stops_df, s) for s in self.stop_ids]
-        self.stop_coords = [snap_coord(c, self.route_geometry) for c in self.stop_coords]
+        self.stop_coords = [
+            snap_coord(c, self.route_geometry) for c in self.stop_coords
+        ]
         # TODO(cpcarey): Raise exception or return False if snapped coord is too far.
 
     def get_route_dir(self):
@@ -77,9 +115,12 @@ class Sequence:
         sequence."""
         values = [trips_df.loc[trip_id][column] for trip_id in self.trip_ids]
         return most_common(values)
+    
+    def has_trip_id(self, trip_id):
+        return trip_id in self.trip_ids_set
 
     def set_attributes(self, trips_df):
-        """Assign attributes to this sequence based on the attribute that
+        """Assigns attributes to this sequence based on the attribute that
         appears most often in matching trips. For example, if the majority of
         trips with this stop sequence have a route ID "M15", then this sequence
         of stops will be labelled as having an "M15" route ID. This is necessary
@@ -96,7 +137,9 @@ class Sequence:
             'route_id': self.route_id,
             'service_id': self.trip_headsign,
             'shape_id': self.shape_id,
+            'stop_coords': [serialize_coord(c) for c in self.stop_coords],
             'stop_ids': [int(s) for s in self.stop_ids],
             'trip_headsign': self.trip_headsign,
             'trip_ids': self.trip_ids,
+            'trip_times_dict': serialize_trip_times_dict(self.trip_times_dict),
         }
