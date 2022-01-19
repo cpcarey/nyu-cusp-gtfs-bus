@@ -1,5 +1,6 @@
 from collections import Counter
 from shapely.geometry import Point
+import datetime
 
 
 def deserialize_coord(values):
@@ -19,13 +20,28 @@ def most_common(list):
     return counts.most_common(1)[0][0]
 
 
+def deserialize_trip_time(trip_time):
+    return datetime.datetime.fromisoformat(trip_time)
+
+
+def deserialize_trip_times(trip_times):
+    return [deserialize_trip_time(t) for t in trip_times]
+
+
+def deserialize_trip_times_dict(trip_times_dict):
+    return {
+        trip_id: deserialize_trip_times(trip_times)
+        for trip_id, trip_times in trip_times_dict.items()
+    }
+
+
 def serialize_coord(coord):
     return [coord.x, coord.y]
 
 
 def serialize_trip_time(trip_time):
     return trip_time.isoformat()
-    
+
 
 def serialize_trip_times(trip_times):
     return [serialize_trip_time(t) for t in trip_times]
@@ -33,8 +49,8 @@ def serialize_trip_times(trip_times):
 
 def serialize_trip_times_dict(trip_times_dict):
     return {
-      trip_id: serialize_trip_times(trip_times)
-      for trip_id, trip_times in trip_times_dict.items()
+        trip_id: serialize_trip_times(trip_times)
+        for trip_id, trip_times in trip_times_dict.items()
     }
 
 
@@ -52,16 +68,15 @@ class Sequence:
             self.route_id = load_dict['route_id']
             self.service_id = load_dict['service_id']
             self.shape_id = load_dict['shape_id']
+            self.stop_distances = load_dict['stop_distances']
             self.stop_ids = load_dict['stop_ids']
+            self.trip_durations_dict = load_dict['trip_durations_dict']
             self.trip_headsign = load_dict['trip_headsign']
             self.trip_ids = load_dict['trip_ids']
+            self.trip_speeds_dict = load_dict['trip_speeds_dict']
 
-            self.stop_coords = [
-                deserialize_coord(c) for c in load_dict['stop_coords']
-            ]
-            self.trip_times_dict = {}
-            
-            self.trip_ids_set = set(self.trip_ids)
+            self.stop_coords = [deserialize_coord(c) for c in load_dict['stop_coords']]
+            self.trip_times_dict = deserialize_trip_times_dict(load_dict['trip_times_dict'])
 
         # Create new sequence genereated from GTFS data.
         else:
@@ -75,7 +90,13 @@ class Sequence:
             self.set_attributes(trips_df)
 
             self.stop_coords = []
+            self.stop_distances = []
+            self.trip_durations_dict = {}
+            self.trip_speeds_dict = {}
             self.trip_times_dict = {}
+
+        self.length = len(self.stop_ids)
+        self.trip_ids_set = set(self.trip_ids)
 
     def assign_route_geometry(self, routes_gdf):
         """Assigns the matching route geometry in the given GeoDataFrame to this
@@ -104,6 +125,42 @@ class Sequence:
             snap_coord(c, self.route_geometry) for c in self.stop_coords
         ]
         # TODO(cpcarey): Raise exception or return False if snapped coord is too far.
+        
+    def calculate_stop_distances(self):
+        """Calculates the distance (in m) along the route geometry between each stop."""
+        self.stop_distances = [0]
+        for i in range(self.length - 1):
+            p1 = self.stop_coords[i]
+            p2 = self.stop_coords[i + 1]
+            # TODO(cpcarey): Use accurate distance calculation.
+            # Approximation of degrees to meters.
+            self.stop_distances.append(p1.distance(p2) * (0.11 / 0.000001))
+            
+    def calculate_trip_durations(self):
+        """Calculates the time duration (in s) between each stop for each trip."""
+        self.trip_durations_dict = {}
+        for trip_id, trip_times in self.trip_times_dict.items():
+            self.trip_durations_dict[trip_id] = [0]
+            for i in range(self.length - 1):
+                t1 = trip_times[i]
+                t2 = trip_times[i + 1]
+                duration = (t2 - t1).total_seconds()
+                self.trip_durations_dict[trip_id].append(duration)
+            
+    def calculate_trip_speeds(self):
+        """Calculates the average speeds (in m/s) along the route geometry between each stop."""
+        if self.stop_distances == []:
+            self.calculate_stop_distances()
+        if self.trip_durations_dict == {}:
+            self.calculate_trip_durations()
+        
+        self.trip_speeds_dict = {}
+        for trip_id in self.trip_times_dict.keys():
+            self.trip_speeds_dict[trip_id] = [0]
+            for i in range(1, self.length):
+                distance = self.stop_distances[i]
+                duration = self.trip_durations_dict[trip_id][i]
+                self.trip_speeds_dict[trip_id].append(distance / duration)
 
     def get_route_dir(self):
         """Returns a string representation of the route ID and direction ID of this sequence."""
@@ -115,7 +172,7 @@ class Sequence:
         sequence."""
         values = [trips_df.loc[trip_id][column] for trip_id in self.trip_ids]
         return most_common(values)
-    
+
     def has_trip_id(self, trip_id):
         return trip_id in self.trip_ids_set
 
@@ -138,8 +195,11 @@ class Sequence:
             'service_id': self.trip_headsign,
             'shape_id': self.shape_id,
             'stop_coords': [serialize_coord(c) for c in self.stop_coords],
+            'stop_distances': self.stop_distances,
             'stop_ids': [int(s) for s in self.stop_ids],
             'trip_headsign': self.trip_headsign,
             'trip_ids': self.trip_ids,
+            'trip_durations_dict': self.trip_durations_dict,
+            'trip_speeds_dict': self.trip_speeds_dict,
             'trip_times_dict': serialize_trip_times_dict(self.trip_times_dict),
         }
