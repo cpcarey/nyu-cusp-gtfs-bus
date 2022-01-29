@@ -1,6 +1,9 @@
 from collections import Counter
 from shapely.geometry import Point
 import datetime
+import numpy as np
+
+import line_string_util
 
 
 def deserialize_coord(values):
@@ -62,7 +65,7 @@ def snap_coord(coord, geometry):
 class Sequence:
 
     def __init__(self, stop_ids=[], trip_ids=[], trips_df=None, load_dict=None):
-        # Create sequence instance loaded from dictionary representation.
+        # Create self instance loaded from dictionary representation.
         if load_dict:
             self.direction_id = load_dict['direction_id']
             self.route_id = load_dict['route_id']
@@ -75,14 +78,17 @@ class Sequence:
             self.trip_ids = load_dict['trip_ids']
             self.trip_speeds_dict = load_dict['trip_speeds_dict']
 
-            self.stop_coords = [deserialize_coord(c) for c in load_dict['stop_coords']]
-            self.trip_times_dict = deserialize_trip_times_dict(load_dict['trip_times_dict'])
+            self.stop_coords = [
+                deserialize_coord(c) for c in load_dict['stop_coords']
+            ]
+            self.trip_times_dict = deserialize_trip_times_dict(
+                load_dict['trip_times_dict'])
 
-        # Create new sequence genereated from GTFS data.
+        # Create new self genereated from GTFS data.
         else:
             if trips_df is None:
                 raise Exception(
-                    'Either GTFS trips DataFrame or saved Sequence in dictionary format '
+                    'Either GTFS trips DataFrame or saved sequence in dictionary format '
                     + 'must be provided.')
 
             self.stop_ids = stop_ids
@@ -97,6 +103,13 @@ class Sequence:
 
         self.length = len(self.stop_ids)
         self.trip_ids_set = set(self.trip_ids)
+
+    def aggregate_speeds(self):
+        stop_speeds = [[] for x in range(self.length)]
+        for trip_speeds in self.trip_speeds_dict.values():
+            for i, speed in enumerate(trip_speeds):
+                stop_speeds[i].append(speed)
+        self.stop_speeds = [np.mean(s) for s in stop_speeds]
 
     def assign_route_geometry(self, routes_gdf):
         """Assigns the matching route geometry in the given GeoDataFrame to this
@@ -125,7 +138,7 @@ class Sequence:
             snap_coord(c, self.route_geometry) for c in self.stop_coords
         ]
         # TODO(cpcarey): Raise exception or return False if snapped coord is too far.
-        
+
     def calculate_stop_distances(self):
         """Calculates the distance (in m) along the route geometry between each stop."""
         self.stop_distances = [0]
@@ -135,7 +148,7 @@ class Sequence:
             # TODO(cpcarey): Use accurate distance calculation.
             # Approximation of degrees to meters.
             self.stop_distances.append(p1.distance(p2) * (0.11 / 0.000001))
-            
+
     def calculate_trip_durations(self):
         """Calculates the time duration (in s) between each stop for each trip."""
         self.trip_durations_dict = {}
@@ -146,14 +159,14 @@ class Sequence:
                 t2 = trip_times[i + 1]
                 duration = (t2 - t1).total_seconds()
                 self.trip_durations_dict[trip_id].append(duration)
-            
+
     def calculate_trip_speeds(self):
         """Calculates the average speeds (in m/s) along the route geometry between each stop."""
         if self.stop_distances == []:
             self.calculate_stop_distances()
         if self.trip_durations_dict == {}:
             self.calculate_trip_durations()
-        
+
         self.trip_speeds_dict = {}
         for trip_id in self.trip_times_dict.keys():
             self.trip_speeds_dict[trip_id] = [0]
@@ -169,9 +182,20 @@ class Sequence:
 
     def get_most_common(self, trips_df, column):
         """Returns the most common value of the given column for this
-        sequence."""
+        self."""
         values = [trips_df.loc[trip_id][column] for trip_id in self.trip_ids]
         return most_common(values)
+        
+    def get_speeds_gdf(self):
+        """Returns a GeoDataFrame of line segments between stops marked with speeds
+        at segment endpoints."""
+        assert self.length > 0
+        assert self.route_geometry != None
+        speeds_gdf = line_string_util.segment_by_distances(
+            self.route_geometry, self.stop_distances, self.stop_speeds)
+        speeds_gdf.loc[:, 'route_id'] = self.route_id
+        speeds_gdf.loc[:, 'direction_id'] = self.direction_id
+        return speeds_gdf
 
     def has_trip_id(self, trip_id):
         return trip_id in self.trip_ids_set
@@ -203,3 +227,17 @@ class Sequence:
             'trip_speeds_dict': self.trip_speeds_dict,
             'trip_times_dict': serialize_trip_times_dict(self.trip_times_dict),
         }
+
+    def trim_route_geometry(self):
+        """Trims the route geometry of this sequence to start and end at the
+        coordinates of the first and last stops."""
+        assert self.length > 0
+        assert self.route_geometry != None
+        trimmed_geometry = self.route_geometry
+        trimmed_geometry = line_string_util.cut(trimmed_geometry,
+                               trimmed_geometry.project(
+                                   self.stop_coords[-1]))[0]
+        trimmed_geometry = line_string_util.cut(trimmed_geometry,
+                               trimmed_geometry.project(
+                                   self.stop_coords[0]))[-1]
+        self.route_geometry = trimmed_geometry
